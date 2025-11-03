@@ -5,8 +5,8 @@ class DustBin(models.Model):
     bin_id = models.CharField(max_length=20, unique=True)
     location_name = models.CharField(max_length=100)
     capacity_liters = models.FloatField(default=50.0)
-    latitude = models.FloatField()
-    longitude = models.FloatField()
+    latitude = models.CharField(max_length=20)
+    longitude = models.CharField(max_length=20)
     threshold = models.IntegerField(
         default=80,
         validators=[MinValueValidator(0), MaxValueValidator(100)]
