@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Smart Dustbin Dashboard</title>
+<style>
+  /* ...existing CSS... */
+  :root{--bg:#0f1724;--card:#0b1220;--muted:#94a3b8;--accent:#06b6d4;--ok:#10b981;--warn:#f59e0b;--alert:#ef4444;--glass:rgba(255,255,255,0.03);font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,"Helvetica Neue",Arial}
+  html,body{height:100%;margin:0;background:linear-gradient(180deg,#071029 0%,#061428 100%);color:#e6eef6}
+  .wrap{max-width:1100px;margin:36px auto;padding:20px}
+  header{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:18px}
+  h1{font-size:1.25rem;margin:0}
+  .controls{display:flex;gap:8px;align-items:center}
+  .btn{background:var(--glass);border:1px solid rgba(255,255,255,0.04);color:var(--muted);padding:8px 12px;border-radius:8px;cursor:pointer;font-weight:600}
+  .search{padding:8px 12px;border-radius:8px;border:1px solid rgba(255,255,255,0.04);background:transparent;color:var(--muted)}
+  .grid{display:grid;grid-template-columns:1fr;gap:12px}
+  @media(min-width:900px){.grid{grid-template-columns:1fr 320px}}
+  .table-card{background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0.01));border-radius:12px;padding:14px;box-shadow:0 6px 24px rgba(2,6,23,0.6)}
+  table{width:100%;border-collapse:collapse;color:#dbeafe;font-size:0.95rem}
+  th,td{padding:10px 8px;text-align:left;border-bottom:1px dashed rgba(255,255,255,0.02)}
+  .pill{display:inline-block;padding:6px 8px;border-radius:999px;font-weight:700;font-size:0.8rem}
+  .ok{background:rgba(16,185,129,0.12);color:var(--ok)}
+  .warn{background:rgba(245,158,11,0.08);color:var(--warn)}
+  .alert{background:rgba(239,68,68,0.08);color:var(--alert)}
+  .meta{color:var(--muted);font-size:0.85rem;margin-top:6px}
+  .loading{display:inline-block;width:18px;height:18px;border-radius:50%;border:3px solid rgba(255,255,255,0.06);border-top-color:var(--accent);animation:spin 1s linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .empty{padding:28px;text-align:center;color:var(--muted)}
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <div>
+        <h1>Smart Dustbin Dashboard</h1>
+        <div class="meta small">Live view of bins, fill percentage, battery & last update</div>
+      </div>
+      <div class="controls">
+        <input id="q" class="search" placeholder="Search by Bin ID or location..." />
+        <button id="refresh" class="btn">Refresh</button>
+        <div id="spinner" style="display:none" title="loading" class="loading" aria-hidden="true"></div>
+      </div>
+    </header>
+
+    <div class="grid">
+      <div class="table-card">
+        <table id="bins-table" aria-live="polite">
+          <thead>
+            <tr>
+              <th>Bin ID</th>
+              <th>Location</th>
+              <th>Fill</th>
+              <th>Capacity(L)</th>
+              <th>Battery</th>
+              <th>Last Updated</th>
+            </tr>
+          </thead>
+          <tbody id="table-body">
+            <tr><td colspan="6" class="empty">Loading data…</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="right-col">
+        <div class="card">
+          <div class="tiny">Total bins</div>
+          <div id="total" class="stat">—</div>
+          <div class="tiny meta">Bins above threshold: <span id="above" style="font-weight:700">0</span></div>
+        </div>
+        <div class="card">
+          <div class="tiny">Latest update</div>
+          <div id="latest" class="small">—</div>
+          <div class="meta">Click a row to copy Bin ID</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+const API_URL = "{{ proxy_url }}"; /* injected by Flask/Jinja */
+const body = document.getElementById('table-body');
+const totalEl = document.getElementById('total');
+const aboveEl = document.getElementById('above');
+const latestEl = document.getElementById('latest');
+const q = document.getElementById('q');
+const refreshBtn = document.getElementById('refresh');
+const spinner = document.getElementById('spinner');
+
+let binsCache = [];
+
+function showSpinner(on){ spinner.style.display = on ? 'inline-block' : 'none'; }
+
+function parseResponsePayload(json){
+  if (!json) return [];
+  if (Array.isArray(json)) return json;
+  if (Array.isArray(json.bins)) return json.bins;
+  if (json.error) {
+    body.innerHTML = `<tr><td colspan="6" class="empty">Server error: ${escapeHtml(String(json.message || json.preview || json.error))}</td></tr>`;
+    return [];
+  }
+  return [];
+}
+
+function fmtDate(ts){
+  if (!ts) return '—';
+  const d = new Date(ts);
+  if (isNaN(d)) return ts;
+  return new Intl.DateTimeFormat(undefined, { dateStyle:'short', timeStyle:'short' }).format(d);
+}
+
+function renderRows(list){
+  if (!list.length){
+    body.innerHTML = '<tr><td colspan="6" class="empty">No bins found.</td></tr>';
+    totalEl.textContent = '0'; aboveEl.textContent = '0'; latestEl.textContent = '—'; return;
+  }
+  const rows = []; let latestTime = null; let aboveCount = 0;
+  list.forEach(b=>{
+    const fp = Number(b.fill_percentage ?? 0);
+    const thr = Number(b.threshold ?? 0);
+    const statusClass = fp >= thr ? 'alert' : fp >= (thr*0.8) ? 'warn' : 'ok';
+    if (fp >= thr) aboveCount++;
+    const updated = b.last_updated ?? b.updated ?? null;
+    if (updated) { const d = new Date(updated); if (!isNaN(d) && (!latestTime || d > latestTime)) latestTime = d; }
+    rows.push(`
+      <tr class="row-hover" data-bin="${escapeHtml(String(b.bin_id ?? ''))}">
+        <td><strong>${escapeHtml(String(b.bin_id ?? '—'))}</strong></td>
+        <td>${escapeHtml(String(b.location_name ?? '—'))}</td>
+        <td><span class="pill ${statusClass}">${isNaN(fp) ? '—' : fp + '%'}</span></td>
+        <td>${escapeHtml(String(b.capacity_liters ?? '—'))}</td>
+        <td class="small">${escapeHtml(String(b.battery_level ?? '—'))} / ${escapeHtml(String(b.wifi_signal ?? '—'))}</td>
+        <td>${escapeHtml(fmtDate(updated))}</td>
+      </tr>`);
+  });
+  body.innerHTML = rows.join('');
+  totalEl.textContent = String(list.length);
+  aboveEl.textContent = String(aboveCount);
+  latestEl.textContent = latestTime ? new Intl.DateTimeFormat(undefined,{dateStyle:'medium',timeStyle:'short'}).format(latestTime) : '—';
+
+  document.querySelectorAll('[data-bin]').forEach(el=>{
+    el.onclick = ()=> { navigator.clipboard?.writeText(el.getAttribute('data-bin')); el.style.outline='2px solid rgba(6,182,212,0.18)'; setTimeout(()=>el.style.outline='',400); };
+  });
+}
+
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+async function fetchBins(){
+  showSpinner(true);
+  try {
+    const res = await fetch(API_URL, {cache:'no-store', headers:{'Accept':'application/json'}});
+    if (!res.ok) throw new Error(res.status + ' ' + res.statusText);
+    const json = await res.json();
+    binsCache = parseResponsePayload(json);
+    applyFilter();
+  } catch (err){
+    body.innerHTML = `<tr><td colspan="6" class="empty">Error fetching data: ${escapeHtml(err.message)}</td></tr>`;
+    totalEl.textContent = '—'; aboveEl.textContent = '—'; latestEl.textContent = '—';
+  } finally { showSpinner(false); }
+}
+
+function applyFilter(){
+  const term = q.value.trim().toLowerCase();
+  let list = binsCache.slice();
+  if (term) list = list.filter(b => (String(b.bin_id||'') + ' ' + String(b.location_name||'')).toLowerCase().includes(term));
+  renderRows(list);
+}
+
+q.addEventListener('input', applyFilter);
+refreshBtn.addEventListener('click', fetchBins);
+
+fetchBins();
+setInterval(fetchBins, 10000);
+</script>
+</body>
+</html>
